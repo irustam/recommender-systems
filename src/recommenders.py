@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-from config import pseudo_item_id
 
 # Для работы с матрицами
 from scipy.sparse import csr_matrix
@@ -9,6 +8,8 @@ from scipy.sparse import csr_matrix
 from implicit.als import AlternatingLeastSquares
 from implicit.nearest_neighbours import ItemItemRecommender  # нужен для одного трюка
 from implicit.nearest_neighbours import bm25_weight, tfidf_weight
+
+from config import pseudo_item_id
 
 
 class MainRecommender:
@@ -28,14 +29,13 @@ class MainRecommender:
         """
                 
         # Топ покупок каждого юзера
-        self.top_col = top_col
-        self.top_purchases = data.groupby(['user_id', 'item_id'])[self.top_col].count().reset_index()
-        self.top_purchases.sort_values(self.top_col, ascending=False, inplace=True)
+        self.top_purchases = data.groupby(['user_id', 'item_id'])[top_col].count().reset_index()
+        self.top_purchases.sort_values(top_col, ascending=False, inplace=True)
         self.top_purchases = self.top_purchases[self.top_purchases['item_id'] != pseudo_item_id]
 
         # Топ покупок по всему датасету
-        self.overall_top_purchases = data.groupby('item_id')[self.top_col].count().reset_index()
-        self.overall_top_purchases.sort_values(self.top_col, ascending=False, inplace=True)
+        self.overall_top_purchases = data.groupby('item_id')[top_col].count().reset_index()
+        self.overall_top_purchases.sort_values(top_col, ascending=False, inplace=True)
         self.overall_top_purchases = self.overall_top_purchases[self.overall_top_purchases['item_id'] != pseudo_item_id]
         self.overall_top_purchases = self.overall_top_purchases.item_id.tolist()
         
@@ -46,13 +46,14 @@ class MainRecommender:
         self.item_id_to_ctm = ctm
         
         # Own recommender обучается до взвешивания матрицы
-        self.own_recommender = self.fit_own_recommender(self.user_item_matrix)
+        self.own_recommender = self.fit_own_recommender()
         
         if weighting:
-            self.user_item_matrix = bm25_weight(self.user_item_matrix.T).T 
+            self.user_item_matrix = bm25_weight(self.user_item_matrix.T).T
+            print('weighting done')
         
-        self.model = self.fit(self.user_item_matrix)
-     
+        self.model = self.fit()
+
     @staticmethod
     def prepare_matrix(data, top_col):
         if top_col == 'sales_value':
@@ -67,11 +68,12 @@ class MainRecommender:
                                   aggfunc=aggfunc, 
                                   fill_value=0
                                  )
-
+        
+        user_item_matrix[user_item_matrix > 0] = 1 # так как в итоге хотим предсказать 
         user_item_matrix = user_item_matrix.astype(float)
         
         return user_item_matrix
-    
+
     @staticmethod
     def prepare_dicts(user_item_matrix):
         """Подготавливает вспомогательные словари"""
@@ -89,25 +91,23 @@ class MainRecommender:
         userid_to_id = dict(zip(userids, matrix_userids))
         
         return id_to_itemid, id_to_userid, itemid_to_id, userid_to_id
-     
-    @staticmethod
-    def fit_own_recommender(user_item_matrix):
+
+    def fit_own_recommender(self):
         """Обучает модель, которая рекомендует товары, среди товаров, купленных юзером"""
     
         own_recommender = ItemItemRecommender(K=1, num_threads=4)
-        own_recommender.fit(csr_matrix(user_item_matrix).T.tocsr(), show_progress=False)
+        own_recommender.fit(csr_matrix(self.user_item_matrix).T.tocsr(), show_progress=False)
         
         return own_recommender
-    
-    @staticmethod
-    def fit(user_item_matrix, n_factors=20, regularization=0.001, iterations=15, num_threads=4):
+
+    def fit(self, n_factors=20, regularization=0.001, iterations=15, num_threads=4):
         """Обучает ALS"""
         
         model = AlternatingLeastSquares(factors=n_factors,
                                          regularization=regularization,
                                          iterations=iterations,
                                          num_threads=num_threads)
-        model.fit(csr_matrix(user_item_matrix).T.tocsr(), show_progress=False)
+        model.fit(csr_matrix(self.user_item_matrix).T.tocsr(), show_progress=False)
         
         return model
 
@@ -122,7 +122,7 @@ class MainRecommender:
         # filter_items = None
         
         if filter_ctm:
-            filter_items.expand([k for k, v in self.item_id_to_ctm.items() if v==1])
+            filter_items.expand(self.item_id_to_ctm)
         
         res = [self.id_to_itemid[rec[0]] for rec in 
                     self.own_recommender.recommend(userid=self.userid_to_id[user], 
@@ -134,7 +134,7 @@ class MainRecommender:
 
         return res
 
-    def get_similar_users_recommendation(self, user, N=5):
+    def get_similar_users_recommendation(self, user, filter_ctm=True, N=5):
         """Рекомендуем топ-N товаров, среди купленных похожими юзерами"""
     
         sparse_user_item = csr_matrix(self.user_item_matrix).tocsr()
